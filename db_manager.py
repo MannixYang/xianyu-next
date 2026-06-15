@@ -1053,6 +1053,50 @@ class DBManager:
                 logger.error(f"Cookie删除失败: {e}")
                 self.conn.rollback()
                 return False
+
+    def rename_cookie_id(self, old_id: str, new_id: str, user_id: int = None) -> bool:
+        """重命名账号ID，并同步更新所有使用 cookie_id 关联的数据。"""
+        with self.lock:
+            try:
+                cursor = self.conn.cursor()
+
+                self._execute_sql(cursor, "SELECT id, user_id FROM cookies WHERE id = ?", (old_id,))
+                existing = cursor.fetchone()
+                if not existing:
+                    raise ValueError("账号不存在")
+
+                if user_id is not None and existing[1] != user_id:
+                    raise PermissionError("无权限操作该账号")
+
+                self._execute_sql(cursor, "SELECT 1 FROM cookies WHERE id = ?", (new_id,))
+                if cursor.fetchone():
+                    raise ValueError("新的账号ID已存在")
+
+                related_tables = [
+                    "keywords",
+                    "cookie_status",
+                    "ai_reply_settings",
+                    "ai_conversations",
+                    "default_replies",
+                    "message_notifications",
+                    "item_info",
+                ]
+
+                self._execute_sql(cursor, "UPDATE cookies SET id = ? WHERE id = ?", (new_id, old_id))
+                for table in related_tables:
+                    self._execute_sql(
+                        cursor,
+                        f"UPDATE {table} SET cookie_id = ? WHERE cookie_id = ?",
+                        (new_id, old_id)
+                    )
+
+                self.conn.commit()
+                logger.info(f"账号ID重命名成功: {old_id} -> {new_id}")
+                return True
+            except Exception as e:
+                logger.error(f"账号ID重命名失败: {old_id} -> {new_id}, {e}")
+                self.conn.rollback()
+                raise
     
     def get_cookie(self, cookie_id: str) -> Optional[str]:
         """获取指定Cookie值"""

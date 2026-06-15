@@ -221,6 +221,12 @@
                     <br>
                     <small class="opacity-75">推荐方式，安全便捷</small>
                   </button>
+                  <button type="button" class="btn btn-primary btn-lg me-md-2 flex-fill" onclick="showBrowserCookieLogin()" style="max-width: 300px;">
+                    <i class="bi bi-browser-chrome me-2"></i>
+                    <span class="fw-bold">浏览器扫码导入</span>
+                    <br>
+                    <small class="opacity-75">读取本机完整Cookie</small>
+                  </button>
                   <button type="button" class="btn btn-outline-secondary btn-lg flex-fill manual-input-btn" onclick="toggleManualInput()" style="max-width: 300px;">
                     <i class="bi bi-keyboard me-2"></i>
                     <span class="fw-bold">手动输入</span>
@@ -1168,6 +1174,9 @@
           <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">
             <i class="bi bi-x-circle me-1"></i>关闭
           </button>
+          <button type="button" class="btn btn-primary" onclick="startBrowserCookieLogin()" id="browserCookieLoginBtn">
+            <i class="bi bi-browser-chrome me-1"></i>本地浏览器导入
+          </button>
           <button type="button" class="btn btn-success" onclick="refreshQRCode()" id="refreshQRBtn">
             <i class="bi bi-arrow-clockwise me-1"></i>重新生成二维码
           </button>
@@ -1828,7 +1837,7 @@
 
   <!-- JS依赖 -->
   <script src="/static/lib/bootstrap/bootstrap.bundle.min.js"></script>
-  <script src="/static/js/app.js?v=202606142132"></script>
+  <script src="/static/js/app.js?v=202606150115"></script>
 
   <!-- 默认回复管理模态框 -->
   <div class="modal fade" id="defaultReplyModal" tabindex="-1" aria-labelledby="defaultReplyModalLabel" aria-hidden="true">

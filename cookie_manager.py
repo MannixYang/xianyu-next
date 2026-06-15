@@ -203,6 +203,71 @@ class CookieManager:
             fut = asyncio.run_coroutine_threadsafe(_update(), self.loop)
             return fut.result()
 
+    def rename_cookie(self, old_id: str, new_id: str, user_id: int = None):
+        """重命名账号ID，并迁移运行态缓存与任务。"""
+        async def _rename():
+            if old_id == new_id:
+                return
+            if old_id not in self.cookies:
+                raise ValueError(f"Cookie ID {old_id} 不存在")
+            if new_id in self.cookies:
+                raise ValueError(f"Cookie ID {new_id} 已存在")
+
+            cookie_info = db_manager.get_cookie_details(old_id)
+            if not cookie_info:
+                raise ValueError("账号不存在")
+
+            original_value = self.cookies.get(old_id, cookie_info.get('value'))
+            original_user_id = cookie_info.get('user_id')
+            original_keywords = self.keywords.get(old_id, []).copy()
+            original_status = self.cookie_status.get(old_id, db_manager.get_cookie_status(old_id))
+            original_auto_confirm = self.auto_confirm_settings.get(old_id, db_manager.get_auto_confirm(old_id))
+
+            task = self.tasks.pop(old_id, None)
+            if task:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+            self.live_instances.pop(old_id, None)
+            self.task_errors.pop(old_id, None)
+
+            try:
+                db_manager.rename_cookie_id(old_id, new_id, user_id)
+            except Exception:
+                if original_status:
+                    restart_task = self.loop.create_task(self._run_xianyu(old_id, original_value, original_user_id))
+                    self.tasks[old_id] = restart_task
+                raise
+
+            self.cookies.pop(old_id, None)
+            self.cookies[new_id] = original_value
+
+            self.keywords.pop(old_id, None)
+            self.keywords[new_id] = original_keywords
+
+            self.cookie_status.pop(old_id, None)
+            self.cookie_status[new_id] = original_status
+
+            self.auto_confirm_settings.pop(old_id, None)
+            self.auto_confirm_settings[new_id] = original_auto_confirm
+
+            if original_status:
+                restart_task = self.loop.create_task(self._run_xianyu(new_id, original_value, original_user_id))
+                self.tasks[new_id] = restart_task
+
+            logger.info(f"已重命名账号ID: {old_id} -> {new_id} (用户ID: {original_user_id})")
+
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None
+
+        if current_loop and current_loop == self.loop:
+            return self.loop.create_task(_rename())
+        else:
+            fut = asyncio.run_coroutine_threadsafe(_rename(), self.loop)
+            return fut.result()
+
     def update_keywords(self, cookie_id: str, kw_list: List[Tuple[str, str]]):
         """线程安全更新关键字"""
         self.keywords[cookie_id] = kw_list

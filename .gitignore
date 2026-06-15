@@ -70,6 +70,7 @@ realtime.log
 # 数据目录
 data/
 backups/
+browser_profiles/
 
 # Excel测试文件
 keywords_*.xlsx

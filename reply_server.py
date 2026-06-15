@@ -12,6 +12,7 @@ import secrets
 import time
 import json
 import os
+import re
 import uvicorn
 import pandas as pd
 import io
@@ -21,6 +22,7 @@ from db_manager import db_manager
 from file_log_collector import setup_file_logging, get_file_log_collector
 from ai_reply_engine import ai_reply_engine
 from utils.qr_login import qr_login_manager
+from utils.browser_cookie_login import browser_cookie_login_manager
 from utils.xianyu_utils import trans_cookies
 from utils.image_utils import image_manager
 from loguru import logger
@@ -851,6 +853,10 @@ class CookieStatusIn(BaseModel):
     enabled: bool
 
 
+class CookieRenameIn(BaseModel):
+    new_id: str
+
+
 async def test_xianyu_cookie_connection(cookie_id: str, cookie_value: str) -> Dict[str, Any]:
     """Check local cookie shape without actively probing Xianyu token APIs."""
     checked_at = int(time.time())
@@ -1067,6 +1073,41 @@ def update_cookie(cid: str, item: CookieIn, current_user: Dict[str, Any] = Depen
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@app.put('/cookies/{cid}/rename')
+def rename_cookie_id(cid: str, item: CookieRenameIn, current_user: Dict[str, Any] = Depends(get_current_user)):
+    """重命名账号ID，并保留该账号的Cookie和配置。"""
+    if cookie_manager.manager is None:
+        raise HTTPException(status_code=500, detail='CookieManager 未就绪')
+
+    new_id = (item.new_id or '').strip()
+    if not re.fullmatch(r'[A-Za-z0-9_.:@-]{1,64}', new_id):
+        raise HTTPException(status_code=400, detail='账号ID只能包含字母、数字、下划线、横线、点、冒号、@，长度1-64位')
+
+    if cid == new_id:
+        return {'msg': 'unchanged', 'old_id': cid, 'new_id': new_id}
+
+    try:
+        user_id = current_user['user_id']
+        user_cookies = db_manager.get_all_cookies(user_id)
+
+        if cid not in user_cookies:
+            raise HTTPException(status_code=403, detail="无权限操作该Cookie")
+
+        if new_id in db_manager.get_all_cookies():
+            raise HTTPException(status_code=400, detail="新的账号ID已存在")
+
+        cookie_manager.manager.rename_cookie(cid, new_id, user_id=user_id)
+        return {'msg': 'renamed', 'old_id': cid, 'new_id': new_id}
+    except HTTPException:
+        raise
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 # ========================= 扫码登录相关接口 =========================
 
 @app.post("/qr-login/generate")
@@ -1075,7 +1116,7 @@ async def generate_qr_code(current_user: Dict[str, Any] = Depends(get_current_us
     try:
         log_with_user('info', "请求生成扫码登录二维码", current_user)
 
-        result = await qr_login_manager.generate_qr_code()
+        result = await qr_login_manager.generate_qr_code(current_user.get('user_id'))
 
         if result['success']:
             log_with_user('info', f"扫码登录二维码生成成功: {result['session_id']}", current_user)
@@ -1097,20 +1138,25 @@ async def check_qr_code_status(session_id: str, current_user: Dict[str, Any] = D
         qr_login_manager.cleanup_expired_sessions()
 
         # 获取会话状态
-        status_info = qr_login_manager.get_session_status(session_id)
+        status_info = qr_login_manager.get_session_status(session_id, current_user.get('user_id'))
 
         if status_info['status'] == 'success':
-            # 登录成功，处理Cookie
-            cookies_info = qr_login_manager.get_session_cookies(session_id)
-            if cookies_info:
-                account_info = await process_qr_login_cookies(
-                    cookies_info['cookies'],
-                    cookies_info['unb'],
-                    current_user
-                )
-                status_info['account_info'] = account_info
+            # 登录成功后只处理一次Cookie，后续轮询直接返回已处理结果。
+            account_info = qr_login_manager.get_session_account_info(session_id)
+            if not account_info:
+                cookies_info = qr_login_manager.get_session_cookies(session_id)
+                if cookies_info:
+                    account_info = await process_qr_login_cookies(
+                        cookies_info['cookies'],
+                        cookies_info['unb'],
+                        current_user
+                    )
+                    qr_login_manager.set_session_account_info(session_id, account_info)
 
-                log_with_user('info', f"扫码登录成功处理完成: {session_id}, 账号: {account_info.get('account_id', 'unknown')}", current_user)
+                    log_with_user('info', f"扫码登录成功处理完成: {session_id}, 账号: {account_info.get('account_id', 'unknown')}", current_user)
+
+            if account_info:
+                status_info['account_info'] = account_info
 
         return status_info
 
@@ -1150,7 +1196,9 @@ async def process_qr_login_cookies(cookies: str, unb: str, current_user: Dict[st
 
             return {
                 'account_id': existing_account_id,
-                'is_new_account': False
+                'is_new_account': False,
+                'action': 'updated',
+                'message': f'已识别为现有账号 {existing_account_id}，已更新 Cookie'
             }
         else:
             # 创建新账号，使用unb作为账号ID
@@ -1174,12 +1222,69 @@ async def process_qr_login_cookies(cookies: str, unb: str, current_user: Dict[st
 
             return {
                 'account_id': account_id,
-                'is_new_account': True
+                'is_new_account': True,
+                'action': 'created',
+                'message': f'新账号添加成功，账号ID: {account_id}'
             }
 
     except Exception as e:
         log_with_user('error', f"处理扫码登录Cookie失败: {str(e)}", current_user)
         raise e
+
+
+@app.post("/browser-cookie-login/start")
+async def start_browser_cookie_login(current_user: Dict[str, Any] = Depends(get_current_user)):
+    """启动本地浏览器扫码登录并准备导入Cookie"""
+    try:
+        log_with_user('info', "请求启动本地浏览器扫码导入Cookie", current_user)
+        result = await browser_cookie_login_manager.start_login(current_user.get('user_id'))
+        if result.get('success'):
+            log_with_user('info', f"本地浏览器扫码导入会话已启动: {result['session_id']}", current_user)
+        else:
+            log_with_user('warning', f"本地浏览器扫码导入启动失败: {result.get('message', '未知错误')}", current_user)
+        return result
+    except Exception as e:
+        log_with_user('error', f"启动本地浏览器扫码导入异常: {str(e)}", current_user)
+        return {'success': False, 'message': f'启动本地浏览器失败: {str(e)}'}
+
+
+@app.get("/browser-cookie-login/check/{session_id}")
+async def check_browser_cookie_login(session_id: str, current_user: Dict[str, Any] = Depends(get_current_user)):
+    """检查本地浏览器扫码导入状态"""
+    try:
+        browser_cookie_login_manager.cleanup_expired_sessions()
+        status_info = browser_cookie_login_manager.get_session_status(session_id, current_user.get('user_id'))
+
+        if status_info['status'] == 'success':
+            account_info = browser_cookie_login_manager.get_session_account_info(session_id)
+            if not account_info:
+                cookies_info = browser_cookie_login_manager.get_session_cookies(session_id)
+                if cookies_info:
+                    account_info = await process_qr_login_cookies(
+                        cookies_info['cookies'],
+                        cookies_info['unb'],
+                        current_user
+                    )
+                    browser_cookie_login_manager.set_session_account_info(session_id, account_info)
+                    log_with_user('info', f"本地浏览器扫码导入成功处理完成: {session_id}, 账号: {account_info.get('account_id', 'unknown')}", current_user)
+
+            if account_info:
+                status_info['account_info'] = account_info
+
+        return status_info
+    except Exception as e:
+        log_with_user('error', f"检查本地浏览器扫码导入状态异常: {str(e)}", current_user)
+        return {'status': 'error', 'message': str(e)}
+
+
+@app.post("/browser-cookie-login/cancel/{session_id}")
+async def cancel_browser_cookie_login(session_id: str, current_user: Dict[str, Any] = Depends(get_current_user)):
+    """取消本地浏览器扫码导入"""
+    try:
+        return await browser_cookie_login_manager.cancel_session(session_id, current_user.get('user_id'))
+    except Exception as e:
+        log_with_user('error', f"取消本地浏览器扫码导入异常: {str(e)}", current_user)
+        return {'success': False, 'message': str(e)}
 
 
 @app.put('/cookies/{cid}/status')
