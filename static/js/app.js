@@ -18,6 +18,7 @@ let cookieConnectionStatusCache = {};
 let cookieConnectionCheckTimer = null;
 const COOKIE_CONNECTION_CHECK_INTERVAL = 600000; // 10分钟
 const COOKIE_CONNECTION_REQUEST_TIMEOUT = 15000; // 15秒请求超时
+let defaultAdminLoginPromise = null;
 
 // 菜单切换功能
 function showSection(sectionName) {
@@ -127,7 +128,7 @@ async function loadDashboard() {
         const accountsWithKeywords = await Promise.all(
         cookiesData.map(async (account) => {
             try {
-            const keywordsResponse = await fetch(`${apiBase}/keywords/${account.id}`, {
+            const keywordsResponse = await fetch(`${apiBase}/keywords/${encodeURIComponent(account.id)}`, {
                 headers: {
                 'Authorization': `Bearer ${authToken}`
                 }
@@ -233,7 +234,7 @@ function updateDashboardAccountsList(accounts) {
     row.className = isEnabled ? '' : 'table-secondary';
     row.innerHTML = `
         <td>
-        <strong class="text-primary ${!isEnabled ? 'text-muted' : ''}">${account.id}</strong>
+        <strong class="text-primary ${!isEnabled ? 'text-muted' : ''}">${escapeHtml(account.id)}</strong>
         ${!isEnabled ? '<i class="bi bi-pause-circle-fill text-danger ms-1" title="已禁用"></i>' : ''}
         </td>
         <td>
@@ -946,19 +947,64 @@ async function handleApiError(err) {
 }
 
 // API请求包装
+async function loginDefaultAdmin() {
+    if (!defaultAdminLoginPromise) {
+    defaultAdminLoginPromise = fetch(`${apiBase}/login`, {
+        method: 'POST',
+        headers: {
+        'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ username: 'admin', password: 'admin' })
+    })
+        .then(async (res) => {
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.success || !data.token) {
+            throw new Error(data.message || '自动登录失败');
+        }
+
+        authToken = data.token;
+        localStorage.setItem('auth_token', data.token);
+        return data.token;
+        })
+        .finally(() => {
+        defaultAdminLoginPromise = null;
+        });
+    }
+
+    return defaultAdminLoginPromise;
+}
+
+async function fetchWithAuth(url, opts = {}, retryAuth = true) {
+    const requestOpts = {
+    ...opts,
+    headers: {
+        ...(opts.headers || {})
+    }
+    };
+
+    if (authToken) {
+    requestOpts.headers['Authorization'] = `Bearer ${authToken}`;
+    }
+
+    let res = await fetch(url, requestOpts);
+    if (res.status === 401 && retryAuth) {
+    localStorage.removeItem('auth_token');
+    authToken = null;
+    await loginDefaultAdmin();
+    return fetchWithAuth(url, opts, false);
+    }
+
+    return res;
+}
+
 async function fetchJSON(url, opts = {}) {
     toggleLoading(true);
     try {
-    // 添加认证头
-    if (authToken) {
-        opts.headers = opts.headers || {};
-        opts.headers['Authorization'] = `Bearer ${authToken}`;
-    }
-
-    const res = await fetch(url, opts);
+    const res = await fetchWithAuth(url, opts);
     if (res.status === 401) {
         // 未授权，跳转到登录页面
         localStorage.removeItem('auth_token');
+        authToken = null;
         window.location.href = '/';
         return;
     }
@@ -1228,7 +1274,8 @@ async function loadCookies() {
         cookieDetails.map(async (cookie) => {
         try {
             // 获取关键词数量
-            const keywordsResponse = await fetch(`${apiBase}/keywords/${cookie.id}`, {
+            const encodedCookieId = encodeURIComponent(cookie.id);
+            const keywordsResponse = await fetch(`${apiBase}/keywords/${encodedCookieId}`, {
             headers: { 'Authorization': `Bearer ${authToken}` }
             });
 
@@ -1239,7 +1286,7 @@ async function loadCookies() {
             }
 
             // 获取默认回复设置
-            const defaultReplyResponse = await fetch(`${apiBase}/default-replies/${cookie.id}`, {
+            const defaultReplyResponse = await fetch(`${apiBase}/default-replies/${encodedCookieId}`, {
             headers: { 'Authorization': `Bearer ${authToken}` }
             });
 
@@ -1249,7 +1296,7 @@ async function loadCookies() {
             }
 
             // 获取AI回复设置
-            const aiReplyResponse = await fetch(`${apiBase}/ai-reply-settings/${cookie.id}`, {
+            const aiReplyResponse = await fetch(`${apiBase}/ai-reply-settings/${encodedCookieId}`, {
             headers: { 'Authorization': `Bearer ${authToken}` }
             });
 
@@ -1276,10 +1323,16 @@ async function loadCookies() {
     );
 
     accountsWithKeywords.forEach(cookie => {
+        const accountId = String(cookie.id || '');
+        const accountIdHtml = escapeHtml(accountId);
+        const accountIdJs = escapeJsString(accountId);
+        const cookieValue = String(cookie.value || '');
+        const cookieValueHtml = escapeHtml(cookieValue || '未设置');
+        const cookieValueJs = escapeJsString(cookieValue);
         // 使用数据库中的实际状态，默认为启用
         const isEnabled = cookie.enabled === undefined ? true : cookie.enabled;
 
-        console.log(`账号 ${cookie.id} 状态: enabled=${cookie.enabled}, isEnabled=${isEnabled}`); // 调试信息
+        console.log(`账号 ${accountId} 状态: enabled=${cookie.enabled}, isEnabled=${isEnabled}`); // 调试信息
 
         const tr = document.createElement('tr');
         tr.className = `account-row ${isEnabled ? 'enabled' : 'disabled'}`;
@@ -1299,12 +1352,12 @@ async function loadCookies() {
         tr.innerHTML = `
         <td class="align-middle">
             <div class="cookie-id">
-            <strong class="text-primary">${cookie.id}</strong>
+            <strong class="text-primary">${accountIdHtml}</strong>
             </div>
         </td>
         <td class="align-middle">
             <div class="cookie-value" title="点击复制Cookie" style="font-family: monospace; font-size: 0.875rem; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
-            ${cookie.value || '未设置'}
+            ${cookieValueHtml}
             </div>
         </td>
         <td class="align-middle">
@@ -1315,7 +1368,7 @@ async function loadCookies() {
         <td class="align-middle">
             <div class="d-flex align-items-center gap-2">
             <label class="status-toggle" title="${isEnabled ? '点击禁用' : '点击启用'}">
-                <input type="checkbox" ${isEnabled ? 'checked' : ''} onchange="toggleAccountStatus('${cookie.id}', this.checked)">
+                <input type="checkbox" ${isEnabled ? 'checked' : ''} onchange="toggleAccountStatus('${accountIdJs}', this.checked)">
                 <span class="status-slider"></span>
             </label>
             <span class="status-badge ${isEnabled ? 'enabled' : 'disabled'}" title="${isEnabled ? '账号已启用' : '账号已禁用'}">
@@ -1323,8 +1376,8 @@ async function loadCookies() {
             </span>
             </div>
         </td>
-        <td class="align-middle cookie-connection-cell" data-cookie-id="${escapeHtml(cookie.id)}">
-            ${renderCookieConnectionStatus(cookie.id)}
+        <td class="align-middle cookie-connection-cell" data-cookie-id="${accountIdHtml}">
+            ${renderCookieConnectionStatus(accountId)}
         </td>
         <td class="align-middle">
             ${defaultReplyBadge}
@@ -1335,7 +1388,7 @@ async function loadCookies() {
         <td class="align-middle">
             <div class="d-flex align-items-center gap-2">
             <label class="status-toggle" title="${autoConfirm ? '点击关闭自动确认发货' : '点击开启自动确认发货'}">
-                <input type="checkbox" ${autoConfirm ? 'checked' : ''} onchange="toggleAutoConfirm('${cookie.id}', this.checked)">
+                <input type="checkbox" ${autoConfirm ? 'checked' : ''} onchange="toggleAutoConfirm('${accountIdJs}', this.checked)">
                 <span class="status-slider"></span>
             </label>
             <span class="status-badge ${autoConfirm ? 'enabled' : 'disabled'}" title="${autoConfirm ? '自动确认发货已开启' : '自动确认发货已关闭'}">
@@ -1345,19 +1398,22 @@ async function loadCookies() {
         </td>
         <td class="align-middle">
             <div class="btn-group" role="group">
-            <button class="btn btn-sm btn-outline-primary" onclick="editCookieInline('${cookie.id}', '${cookie.value}')" title="修改Cookie" ${!isEnabled ? 'disabled' : ''}>
+            <button class="btn btn-sm btn-outline-secondary" onclick="renameCookieId('${accountIdJs}')" title="修改账号ID">
+                <i class="bi bi-pencil-square"></i>
+            </button>
+            <button class="btn btn-sm btn-outline-primary" onclick="editCookieInline('${accountIdJs}', '${cookieValueJs}')" title="修改Cookie" ${!isEnabled ? 'disabled' : ''}>
                 <i class="bi bi-pencil"></i>
             </button>
-            <button class="btn btn-sm btn-outline-success" onclick="goToAutoReply('${cookie.id}')" title="${isEnabled ? '设置自动回复' : '配置关键词 (账号已禁用)'}">
+            <button class="btn btn-sm btn-outline-success" onclick="goToAutoReply('${accountIdJs}')" title="${isEnabled ? '设置自动回复' : '配置关键词 (账号已禁用)'}">
                 <i class="bi bi-arrow-right-circle"></i>
             </button>
-            <button class="btn btn-sm btn-outline-warning" onclick="configAIReply('${cookie.id}')" title="配置AI回复" ${!isEnabled ? 'disabled' : ''}>
+            <button class="btn btn-sm btn-outline-warning" onclick="configAIReply('${accountIdJs}')" title="配置AI回复" ${!isEnabled ? 'disabled' : ''}>
                 <i class="bi bi-robot"></i>
             </button>
-            <button class="btn btn-sm btn-outline-info" onclick="copyCookie('${cookie.id}', '${cookie.value}')" title="复制Cookie">
+            <button class="btn btn-sm btn-outline-info" onclick="copyCookie('${accountIdJs}', '${cookieValueJs}')" title="复制Cookie">
                 <i class="bi bi-clipboard"></i>
             </button>
-            <button class="btn btn-sm btn-outline-danger" onclick="delCookie('${cookie.id}')" title="删除账号">
+            <button class="btn btn-sm btn-outline-danger" onclick="delCookie('${accountIdJs}')" title="删除账号">
                 <i class="bi bi-trash"></i>
             </button>
             </div>
@@ -1420,11 +1476,69 @@ async function delCookie(id) {
     if (!confirm(`确定要删除账号 "${id}" 吗？此操作不可恢复。`)) return;
 
     try {
-    await fetchJSON(apiBase + `/cookies/${id}`, { method: 'DELETE' });
+    await fetchJSON(apiBase + `/cookies/${encodeURIComponent(id)}`, { method: 'DELETE' });
     showToast(`账号 "${id}" 已删除`, 'success');
     loadCookies();
     } catch (err) {
     // 错误已在fetchJSON中处理
+    }
+}
+
+// 修改账号ID
+async function renameCookieId(id) {
+    const newId = prompt('请输入新的账号ID（字母、数字、下划线、横线、点、冒号、@，1-64位）', id);
+    if (newId === null) return;
+
+    const trimmedNewId = newId.trim();
+    if (!trimmedNewId) {
+    showToast('账号ID不能为空', 'warning');
+    return;
+    }
+    if (trimmedNewId === id) {
+    showToast('账号ID没有变化', 'info');
+    return;
+    }
+    if (!/^[A-Za-z0-9_.:@-]{1,64}$/.test(trimmedNewId)) {
+    showToast('账号ID只能包含字母、数字、下划线、横线、点、冒号、@，长度1-64位', 'warning');
+    return;
+    }
+
+    try {
+    const result = await fetchJSON(apiBase + `/cookies/${encodeURIComponent(id)}/rename`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ new_id: trimmedNewId })
+    });
+
+    const finalId = result.new_id || trimmedNewId;
+    if (cookieConnectionStatusCache[id]) {
+        cookieConnectionStatusCache[finalId] = cookieConnectionStatusCache[id];
+        delete cookieConnectionStatusCache[id];
+    }
+    if (accountKeywordCache[id]) {
+        accountKeywordCache[finalId] = accountKeywordCache[id];
+        delete accountKeywordCache[id];
+    }
+    if (keywordsData[id]) {
+        keywordsData[finalId] = keywordsData[id];
+        delete keywordsData[id];
+    }
+    if (currentCookieId === id) {
+        currentCookieId = finalId;
+    }
+
+    const accountSelect = document.getElementById('accountSelect');
+    if (accountSelect && accountSelect.value === id) {
+        accountSelect.value = finalId;
+    }
+
+    showToast(`账号ID已修改为 "${finalId}"`, 'success');
+    await loadCookies();
+    refreshAccountList();
+    loadDashboard();
+    } catch (err) {
+    console.error('账号ID修改失败:', err);
+    showToast(`账号ID修改失败: ${err.message || '未知错误'}`, 'danger');
     }
 }
 
@@ -1509,7 +1623,7 @@ async function saveCookieInline(id) {
     try {
     toggleLoading(true);
 
-    await fetchJSON(apiBase + `/cookies/${id}`, {
+    await fetchJSON(apiBase + `/cookies/${encodeURIComponent(id)}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1538,7 +1652,7 @@ function cancelCookieEdit(id) {
     return;
     }
 
-    const row = document.querySelector(`#edit-${id}`).closest('tr');
+    const row = document.getElementById(`edit-${id}`).closest('tr');
     const cookieValueCell = row.querySelector('.cookie-value');
 
     // 恢复原内容
@@ -5499,6 +5613,15 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
+function escapeJsString(text) {
+    return String(text || '')
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "\\'")
+    .replace(/\r/g, '\\r')
+    .replace(/\n/g, '\\n')
+    .replace(/</g, '\\x3C');
+}
+
 // ==================== 日志管理功能 ====================
 
 window.autoRefreshInterval = null;
@@ -5909,37 +6032,58 @@ function toggleManualInput() {
 
 let qrCodeCheckInterval = null;
 let qrCodeSessionId = null;
+let browserCookieLoginCheckInterval = null;
+let browserCookieLoginSessionId = null;
 
 // 显示扫码登录模态框
 function showQRCodeLogin() {
-    const modal = new bootstrap.Modal(document.getElementById('qrCodeLoginModal'));
+    const modalElement = document.getElementById('qrCodeLoginModal');
+    const modal = bootstrap.Modal.getOrCreateInstance(modalElement);
     modal.show();
 
-    // 模态框显示后生成二维码
-    modal._element.addEventListener('shown.bs.modal', function () {
+    // 模态框显示后生成二维码，避免重复打开时绑定多个监听器。
+    modalElement.addEventListener('shown.bs.modal', function () {
     generateQRCode();
-    });
+    }, { once: true });
 
     // 模态框关闭时清理定时器
-    modal._element.addEventListener('hidden.bs.modal', function () {
+    modalElement.addEventListener('hidden.bs.modal', function () {
     clearQRCodeCheck();
-    });
+    cancelBrowserCookieLogin();
+    }, { once: true });
+}
+
+// 显示扫码登录模态框并启动本地浏览器导入
+function showBrowserCookieLogin() {
+    const modalElement = document.getElementById('qrCodeLoginModal');
+    const modal = bootstrap.Modal.getOrCreateInstance(modalElement);
+    modal.show();
+
+    modalElement.addEventListener('shown.bs.modal', function () {
+    startBrowserCookieLogin();
+    }, { once: true });
+
+    modalElement.addEventListener('hidden.bs.modal', function () {
+    clearQRCodeCheck();
+    cancelBrowserCookieLogin();
+    }, { once: true });
 }
 
 // 刷新二维码（兼容旧函数名）
 async function refreshQRCode() {
+    await cancelBrowserCookieLogin();
     await generateQRCode();
 }
 
 // 生成二维码
 async function generateQRCode() {
     try {
+    await cancelBrowserCookieLogin();
     showQRCodeLoading();
 
-    const response = await fetch(`${apiBase}/qr-login/generate`, {
+    const response = await fetchWithAuth(`${apiBase}/qr-login/generate`, {
         method: 'POST',
         headers: {
-        'Authorization': `Bearer ${authToken}`,
         'Content-Type': 'application/json'
         }
     });
@@ -5954,7 +6098,8 @@ async function generateQRCode() {
         showQRCodeError(data.message || '生成二维码失败');
         }
     } else {
-        showQRCodeError('生成二维码失败');
+        const data = await response.json().catch(() => ({}));
+        showQRCodeError(data.detail || data.message || '生成二维码失败');
     }
     } catch (error) {
     console.error('生成二维码失败:', error);
@@ -5962,9 +6107,150 @@ async function generateQRCode() {
     }
 }
 
+async function startBrowserCookieLogin() {
+    try {
+    clearQRCodeCheck();
+    await cancelBrowserCookieLogin();
+    showBrowserCookieLoginLoading();
+
+    const response = await fetchWithAuth(`${apiBase}/browser-cookie-login/start`, {
+        method: 'POST',
+        headers: {
+        'Content-Type': 'application/json'
+        }
+    });
+    const data = await response.json().catch(() => ({}));
+
+    if (!response.ok || !data.success) {
+        showQRCodeError(data.detail || data.message || '启动本地浏览器失败');
+        return;
+    }
+
+    browserCookieLoginSessionId = data.session_id;
+    document.getElementById('statusText').textContent = data.message || '浏览器已打开，请扫码登录';
+    document.getElementById('statusSpinner').style.display = 'inline-block';
+    startBrowserCookieLoginCheck();
+    } catch (error) {
+    console.error('启动本地浏览器导入失败:', error);
+    showQRCodeError('启动本地浏览器失败，请查看后端日志');
+    }
+}
+
+function showBrowserCookieLoginLoading() {
+    document.getElementById('qrCodeContainer').style.display = 'block';
+    document.getElementById('qrCodeContainer').innerHTML = `
+    <div class="text-center">
+        <div class="spinner-border text-primary mb-3" role="status" style="width: 3rem; height: 3rem;">
+        <span class="visually-hidden">正在启动本地浏览器...</span>
+        </div>
+        <h6 class="text-primary mb-3">正在启动本地浏览器</h6>
+        <div class="alert alert-info border-0 text-start d-inline-block">
+        <div><i class="bi bi-browser-chrome me-2"></i>浏览器打开后，请在闲鱼页面完成扫码登录。</div>
+        <div class="mt-2"><i class="bi bi-shield-check me-2"></i>项目只会本地保存 Cookie，不会在页面显示明文 Cookie。</div>
+        </div>
+    </div>
+    `;
+    document.getElementById('qrCodeImage').style.display = 'none';
+    document.getElementById('statusText').textContent = '正在启动本地浏览器...';
+    document.getElementById('statusSpinner').style.display = 'inline-block';
+
+    const verificationContainer = document.getElementById('verificationContainer');
+    if (verificationContainer) {
+    verificationContainer.style.display = 'none';
+    }
+}
+
+function startBrowserCookieLoginCheck() {
+    if (browserCookieLoginCheckInterval) {
+    clearInterval(browserCookieLoginCheckInterval);
+    }
+    browserCookieLoginCheckInterval = setInterval(checkBrowserCookieLoginStatus, 2000);
+}
+
+async function checkBrowserCookieLoginStatus() {
+    if (!browserCookieLoginSessionId) return;
+
+    try {
+    const response = await fetchWithAuth(`${apiBase}/browser-cookie-login/check/${browserCookieLoginSessionId}`);
+    const data = await response.json().catch(() => ({}));
+
+    if (!response.ok) {
+        showQRCodeError(data.detail || data.message || '检查浏览器登录状态失败');
+        clearBrowserCookieLoginCheck();
+        return;
+    }
+
+    switch (data.status) {
+    case 'starting':
+    case 'waiting':
+        document.getElementById('statusText').textContent = data.message || '等待浏览器扫码登录...';
+        document.getElementById('statusSpinner').style.display = 'inline-block';
+        break;
+    case 'success':
+        document.getElementById('statusText').textContent = data.message || '浏览器登录成功';
+        document.getElementById('statusSpinner').style.display = 'none';
+        clearBrowserCookieLoginCheck();
+        handleQRCodeSuccess(data);
+        break;
+    case 'expired':
+        document.getElementById('statusText').textContent = '浏览器登录超时';
+        document.getElementById('statusSpinner').style.display = 'none';
+        clearBrowserCookieLoginCheck();
+        showQRCodeError(data.message || '浏览器登录超时，请重新发起导入');
+        break;
+    case 'cancelled':
+        document.getElementById('statusText').textContent = '已取消浏览器登录';
+        document.getElementById('statusSpinner').style.display = 'none';
+        clearBrowserCookieLoginCheck();
+        break;
+    case 'not_found':
+    case 'error':
+        document.getElementById('statusText').textContent = data.message || '浏览器登录失败';
+        document.getElementById('statusSpinner').style.display = 'none';
+        clearBrowserCookieLoginCheck();
+        showQRCodeError(data.message || '浏览器登录失败');
+        break;
+    }
+    } catch (error) {
+    console.error('检查浏览器登录状态失败:', error);
+    }
+}
+
+function clearBrowserCookieLoginCheck() {
+    if (browserCookieLoginCheckInterval) {
+    clearInterval(browserCookieLoginCheckInterval);
+    browserCookieLoginCheckInterval = null;
+    }
+}
+
+async function cancelBrowserCookieLogin() {
+    clearBrowserCookieLoginCheck();
+    if (!browserCookieLoginSessionId) return;
+
+    const sessionId = browserCookieLoginSessionId;
+    browserCookieLoginSessionId = null;
+    try {
+    await fetchWithAuth(`${apiBase}/browser-cookie-login/cancel/${sessionId}`, {
+        method: 'POST'
+    });
+    } catch (error) {
+    console.error('取消浏览器登录失败:', error);
+    }
+}
+
 // 显示二维码加载状态
 function showQRCodeLoading() {
     document.getElementById('qrCodeContainer').style.display = 'block';
+    document.getElementById('qrCodeContainer').innerHTML = `
+    <div class="spinner-border text-success mb-3" role="status" style="width: 3rem; height: 3rem;">
+        <span class="visually-hidden">生成二维码中...</span>
+    </div>
+    <p class="text-muted fs-5 mb-2">正在生成二维码...</p>
+    <div class="alert alert-warning border-0 bg-light-warning d-inline-block qr-loading-tip">
+        <i class="bi bi-clock me-2 text-warning"></i>
+        <small class="text-warning fw-bold">二维码生成较慢，请耐心等待</small>
+    </div>
+    `;
     document.getElementById('qrCodeImage').style.display = 'none';
     document.getElementById('statusText').textContent = '正在生成二维码，请耐心等待...';
     document.getElementById('statusSpinner').style.display = 'none';
@@ -6015,11 +6301,7 @@ async function checkQRCodeStatus() {
     if (!qrCodeSessionId) return;
 
     try {
-    const response = await fetch(`${apiBase}/qr-login/check/${qrCodeSessionId}`, {
-        headers: {
-        'Authorization': `Bearer ${authToken}`
-        }
-    });
+    const response = await fetchWithAuth(`${apiBase}/qr-login/check/${qrCodeSessionId}`);
 
     if (response.ok) {
         const data = await response.json();
@@ -6049,10 +6331,22 @@ async function checkQRCodeStatus() {
             clearQRCodeCheck();
             break;
         case 'verification_required':
-            document.getElementById('statusText').textContent = '需要手机验证';
+            document.getElementById('statusText').textContent = data.message || '需要手机验证';
             document.getElementById('statusSpinner').style.display = 'none';
             clearQRCodeCheck();
             showVerificationRequired(data);
+            break;
+        case 'not_found':
+            document.getElementById('statusText').textContent = '二维码会话不存在，请重新生成';
+            document.getElementById('statusSpinner').style.display = 'none';
+            clearQRCodeCheck();
+            showQRCodeError('二维码会话不存在，请重新生成');
+            break;
+        case 'error':
+            document.getElementById('statusText').textContent = data.message || '检查失败';
+            document.getElementById('statusSpinner').style.display = 'none';
+            clearQRCodeCheck();
+            showQRCodeError(data.message || '检查二维码状态失败');
             break;
         }
     }
@@ -6117,21 +6411,19 @@ function showVerificationRequired(data) {
 // 处理扫码成功
 function handleQRCodeSuccess(data) {
     if (data.account_info) {
-    const { account_id, is_new_account } = data.account_info;
+    const { account_id, is_new_account, message } = data.account_info;
+    const successMessage = message || (is_new_account
+        ? `新账号添加成功！账号ID: ${account_id}`
+        : `已识别为现有账号 ${account_id}，已更新 Cookie`);
 
-    if (is_new_account) {
-        showToast(`新账号添加成功！账号ID: ${account_id}`, 'success');
-    } else {
-        showToast(`账号Cookie已更新！账号ID: ${account_id}`, 'success');
-    }
+    document.getElementById('statusText').textContent = successMessage;
+    showToast(successMessage, 'success');
+    loadCookies();
 
     // 关闭模态框
     setTimeout(() => {
-        const modal = bootstrap.Modal.getInstance(document.getElementById('qrCodeLoginModal'));
+        const modal = bootstrap.Modal.getOrCreateInstance(document.getElementById('qrCodeLoginModal'));
         modal.hide();
-
-        // 刷新账号列表
-        loadCookies();
     }, 2000);
     }
 }
@@ -6143,12 +6435,6 @@ function clearQRCodeCheck() {
     qrCodeCheckInterval = null;
     }
     qrCodeSessionId = null;
-}
-
-// 刷新二维码
-function refreshQRCode() {
-    clearQRCodeCheck();
-    generateQRCode();
 }
 
 // ==================== 图片关键词管理功能 ====================
