@@ -105,6 +105,8 @@ async def main():
             manager.tasks[cid] = task
             logger.info(f"启动数据库中的 Cookie 任务: {cid} (用户ID: {user_id})")
             logger.info(f"任务已添加到管理器，当前任务数: {len(manager.tasks)}")
+            # 账号错峰启动，避免服务重启时同时请求闲鱼接口
+            await asyncio.sleep(2)
         except Exception as e:
             logger.error(f"启动 Cookie 任务失败: {cid}, {e}")
             import traceback
@@ -121,12 +123,14 @@ async def main():
         kw_list = load_keywords_file(kw_file) if kw_file else None
         manager.add_cookie(cid, val, kw_list)
         logger.info(f"从配置文件加载 Cookie: {cid}")
+        await asyncio.sleep(2)
 
     # 3) 若老环境变量仍提供单账号 Cookie，则作为 default 账号
     env_cookie = os.getenv('COOKIES_STR')
     if env_cookie and 'default' not in manager.list_cookies():
         manager.add_cookie('default', env_cookie)
         logger.info("从环境变量加载 default Cookie")
+        await asyncio.sleep(2)
 
     # 启动 API 服务线程
     print("启动 API 服务线程...")
@@ -139,4 +143,4 @@ async def main():
 
 
 if __name__ == '__main__':
-    asyncio.run(main()) 
+    asyncio.run(main())

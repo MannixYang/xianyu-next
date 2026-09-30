@@ -6,6 +6,7 @@ import time
 import hashlib
 import struct
 import os
+import uuid
 from typing import Any, Dict, List
 
 import blackboxprotobuf
@@ -83,28 +84,9 @@ def generate_uuid() -> str:
 
 
 def generate_device_id(user_id: str) -> str:
-    """生成设备ID"""
-    import random
-    
-    # 字符集
-    chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-    result = []
-    
-    for i in range(36):
-        if i in [8, 13, 18, 23]:
-            result.append("-")
-        elif i == 14:
-            result.append("4")
-        else:
-            if i == 19:
-                # 对于位置19，需要特殊处理
-                rand_val = int(16 * random.random())
-                result.append(chars[(rand_val & 0x3) | 0x8])
-            else:
-                rand_val = int(16 * random.random())
-                result.append(chars[rand_val])
-    
-    return ''.join(result) + "-" + user_id
+    """生成与账号绑定且跨进程稳定的设备 ID。"""
+    stable_uuid = uuid.uuid5(uuid.NAMESPACE_URL, f"goofish-device:{user_id}")
+    return f"{stable_uuid}-{user_id}"
 
 
 def generate_sign(t: str, token: str, data: str) -> str:

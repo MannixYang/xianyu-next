@@ -100,6 +100,7 @@ class XianyuLive:
         self.last_token_error = ''
         self.last_token_error_time = 0
         self.connection_restart_flag = False  # 连接重启标志
+        self.requires_relogin = False  # 会话失效或触发验证码后暂停重试
 
         # 通知防重复机制
         self.last_notification_time = {}  # 记录每种通知类型的最后发送时间
@@ -126,7 +127,13 @@ class XianyuLive:
     def _is_risk_control_error(self, error_text):
         return any(
             marker in (error_text or '')
-            for marker in ('FAIL_SYS_USER_VALIDATE', 'RGV587_ERROR', '被挤爆啦')
+            for marker in ('FAIL_SYS_USER_VALIDATE', 'RGV587_ERROR', '被挤爆啦', 'action=captcha')
+        )
+
+    def _is_session_expired_error(self, error_text):
+        return any(
+            marker in (error_text or '')
+            for marker in ('FAIL_SYS_SESSION_EXPIRED', 'FAIL_SYS_TOKEN_EXOIRED')
         )
 
     def _is_success_response(self, res_json):
@@ -371,7 +378,7 @@ class XianyuLive:
             params = {
                 'jsv': '2.7.2',
                 'appKey': '34839810',
-                't': str(int(time.time()) * 1000),
+                't': str(int(time.time() * 1000)),
                 'sign': '',
                 'v': '1.0',
                 'type': 'originaljson',
@@ -418,6 +425,7 @@ class XianyuLive:
                                 self.last_token_refresh_time = time.time()
                                 self.last_token_error = ''
                                 self.last_token_error_time = 0
+                                self.requires_relogin = False
                                 logger.info(f"【{self.cookie_id}】Token刷新成功")
                                 return new_token
 
@@ -426,6 +434,14 @@ class XianyuLive:
 
                     self.last_token_error = str(res_json)
                     self.last_token_error_time = time.time()
+                    if (
+                        self._is_risk_control_error(self.last_token_error)
+                        or self._is_session_expired_error(self.last_token_error)
+                    ):
+                        self.requires_relogin = True
+                        logger.warning(
+                            f"【{self.cookie_id}】闲鱼会话需要重新登录，暂停自动重试，避免持续请求触发风控"
+                        )
                     logger.error(f"【{self.cookie_id}】Token刷新失败: {res_json}")
                     # 发送Token刷新失败通知
                     await self.send_token_refresh_notification(f"Token刷新失败: {res_json}", "token_refresh_failed")
@@ -761,7 +777,7 @@ class XianyuLive:
         params = {
             'jsv': '2.7.2',
             'appKey': '34839810',
-            't': str(int(time.time()) * 1000),
+            't': str(int(time.time() * 1000)),
             'sign': '',
             'v': '1.0',
             'type': 'originaljson',
@@ -2170,6 +2186,9 @@ class XianyuLive:
                             await self.ws.close()
                         break
                     else:
+                        if self.requires_relogin:
+                            logger.warning(f"【{self.cookie_id}】Token刷新已暂停，请更新Cookie后再启用账号")
+                            break
                         logger.error(f"【{self.cookie_id}】Token刷新失败，将在{self.token_retry_interval // 60}分钟后重试")
                         # 发送Token刷新失败通知
                         await self.send_token_refresh_notification("Token定时刷新失败，将自动重试", "token_scheduled_refresh_failed")
@@ -2272,7 +2291,7 @@ class XianyuLive:
                 "cache-header": "app-key token ua wv",
                 "app-key": APP_CONFIG.get('app_key'),
                 "token": self.current_token,
-                "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36 DingTalk(2.1.5) OS(Windows/10) Browser(Chrome/133.0.0.0) DingWeb/2.1.5 IMPaaS DingWeb/2.1.5",
+                "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36 DingTalk(2.1.5) OS(Windows/10) Browser(Chrome/138.0.0.0) DingWeb/2.1.5 IMPaaS DingWeb/2.1.5",
                 "dt": "j",
                 "wv": "im:3,au:3,sy:6",
                 "sync": "0,0;0;0;",
@@ -2347,7 +2366,7 @@ class XianyuLive:
             "Connection": "Upgrade",
             "Pragma": "no-cache",
             "Cache-Control": "no-cache",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
             "Origin": "https://www.goofish.com",
             "Accept-Encoding": "gzip, deflate, br, zstd",
             "Accept-Language": "zh-CN,zh;q=0.9",
@@ -2968,6 +2987,9 @@ class XianyuLive:
                     if self.token_refresh_task:
                         self.token_refresh_task.cancel()
                     token_error_text = getattr(self, 'last_token_error', '')
+                    if getattr(self, 'requires_relogin', False):
+                        logger.error(f"【{self.cookie_id}】账号任务已暂停：请重新扫码登录并更新Cookie")
+                        break
                     if self._is_risk_control_error(error_text) or self._is_risk_control_error(token_error_text):
                         wait_seconds = 600
                         logger.warning(f"【{self.cookie_id}】疑似触发闲鱼风控，{wait_seconds // 60}分钟后再重试连接")
@@ -3013,7 +3035,7 @@ class XianyuLive:
         params = {
             'jsv': '2.7.2',
             'appKey': '34839810',
-            't': str(int(time.time()) * 1000),
+            't': str(int(time.time() * 1000)),
             'sign': '',
             'v': '1.0',
             'type': 'originaljson',

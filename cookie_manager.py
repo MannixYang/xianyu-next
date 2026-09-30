@@ -77,6 +77,8 @@ class CookieManager:
             self.live_instances[cookie_id] = live
             logger.info(f"【{cookie_id}】XianyuLive实例创建成功，开始调用main()...")
             await live.main()
+            if getattr(live, 'requires_relogin', False):
+                self.task_errors[cookie_id] = '闲鱼会话已失效或触发风控，请重新扫码登录并更新Cookie'
         except asyncio.CancelledError:
             logger.info(f"XianyuLive 任务已取消: {cookie_id}")
         except Exception as e:
@@ -314,8 +316,14 @@ class CookieManager:
     def _start_cookie_task(self, cookie_id: str):
         """启动指定Cookie的任务"""
         if cookie_id in self.tasks:
-            logger.warning(f"Cookie任务已存在，跳过启动: {cookie_id}")
-            return
+            existing_task = self.tasks[cookie_id]
+            if not existing_task.done():
+                logger.warning(f"Cookie任务已存在，跳过启动: {cookie_id}")
+                return
+            # 允许风控暂停后的账号通过“启用”重新启动
+            self.tasks.pop(cookie_id, None)
+            self.task_errors.pop(cookie_id, None)
+            self.live_instances.pop(cookie_id, None)
 
         cookie_value = self.cookies.get(cookie_id)
         if not cookie_value:
